@@ -1,0 +1,23 @@
+{
+  "demographics": [
+    "Age",
+    "BMI",
+    "PregnancyWeek"
+  ],
+  "lab_values": [
+    "Hemoglobin",
+    "BloodSugar",
+    "SystolicBP",
+    "DiastolicBP",
+    "TSH",
+    "AmnioticFluid"
+  ],
+  "symptoms": [
+    "fatigue",
+    "yellow_eyes",
+    "frequent_urination",
+    "headache",
+    "reduced_baby_movement"
+  ],
+  "target": "RiskLevel (LOW / MEDIUM / HIGH)"
+}
