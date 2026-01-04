@@ -1,5 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabaseClient';
+
+const MEDICAL_RANGES = {
+  age: { min: 15, max: 50, step: 1, unit: 'years' },
+  bmi: { min: 15, max: 50, step: 0.1, unit: 'kg/m²' },
+  gestational_week: { min: 1, max: 42, step: 1, unit: 'weeks' },
+  systolic_bp: { min: 70, max: 200, step: 1, unit: 'mmHg' },
+  diastolic_bp: { min: 40, max: 130, step: 1, unit: 'mmHg' },
+  blood_sugar: { min: 50, max: 400, step: 0.1, unit: 'mg/dL' },
+  hemoglobin: { min: 5, max: 20, step: 0.1, unit: 'g/dL' },
+  kick_count: { min: 0, max: 50, step: 1, unit: 'per hour' },
+  amniotic_fluid: { min: 0, max: 30, step: 0.1, unit: 'cm' }
+};
 
 export default function App() {
   const [user, setUser] = useState(null);
@@ -11,17 +23,25 @@ export default function App() {
   const [showHealthForm, setShowHealthForm] = useState(false);
   const [healthRecords, setHealthRecords] = useState([]);
   const [latestRecord, setLatestRecord] = useState(null);
+  const [predicting, setPredicting] = useState(false);
 
   const [healthData, setHealthData] = useState({
     age: '',
-    hemoglobin: '',
-    blood_sugar: '',
+    bmi: '',
+    gestational_week: '',
     systolic_bp: '',
     diastolic_bp: '',
-    tsh: '',
+    blood_sugar: '',
+    hemoglobin: '',
+    kick_count: '',
     amniotic_fluid: '',
+    previous_complications: '0',
+    rh_factor: '1',
+    pregnancy_order: '1',
     notes: ''
   });
+
+  const inputRefs = useRef({});
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -65,25 +85,45 @@ export default function App() {
     }
   };
 
-  const calculateRiskLevel = async (data) => {
-    const riskScore =
-      (parseFloat(data.hemoglobin) < 10 ? 2 : 0) +
-      (parseFloat(data.blood_sugar) > 140 ? 2 : 0) +
-      (parseInt(data.systolic_bp) > 140 ? 2 : 0) +
-      (parseInt(data.diastolic_bp) > 90 ? 2 : 0) +
-      (parseFloat(data.tsh) > 4 || parseFloat(data.tsh) < 0.5 ? 1 : 0) +
-      (parseFloat(data.amniotic_fluid) < 10 ? 2 : 0);
+  const handleKeyDown = (e, fieldName) => {
+    const config = MEDICAL_RANGES[fieldName];
+    if (!config) return;
 
-    if (riskScore >= 5) return 'HIGH';
-    if (riskScore >= 2) return 'MEDIUM';
-    return 'LOW';
+    const currentValue = parseFloat(healthData[fieldName]) || config.min;
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const newValue = Math.min(currentValue + config.step, config.max);
+      setHealthData({ ...healthData, [fieldName]: newValue.toFixed(config.step < 1 ? 1 : 0) });
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const newValue = Math.max(currentValue - config.step, config.min);
+      setHealthData({ ...healthData, [fieldName]: newValue.toFixed(config.step < 1 ? 1 : 0) });
+    }
+  };
+
+  const validateInput = (fieldName, value) => {
+    const config = MEDICAL_RANGES[fieldName];
+    if (!config) return true;
+
+    const numValue = parseFloat(value);
+    if (isNaN(numValue)) return false;
+    return numValue >= config.min && numValue <= config.max;
   };
 
   const handleHealthSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setPredicting(true);
 
     try {
+      for (const [field, value] of Object.entries(healthData)) {
+        if (MEDICAL_RANGES[field] && value && !validateInput(field, value)) {
+          const config = MEDICAL_RANGES[field];
+          throw new Error(`${field} must be between ${config.min} and ${config.max} ${config.unit}`);
+        }
+      }
+
       const { data: profile } = await supabase
         .from('patient_profiles')
         .select('id')
@@ -103,19 +143,48 @@ export default function App() {
         patientId = newProfile.id;
       }
 
-      const riskLevel = await calculateRiskLevel(healthData);
+      const predictionData = {
+        age: parseFloat(healthData.age),
+        bmi: parseFloat(healthData.bmi),
+        gestational_week: parseInt(healthData.gestational_week),
+        systolic_bp: parseInt(healthData.systolic_bp),
+        diastolic_bp: parseInt(healthData.diastolic_bp),
+        blood_sugar: parseFloat(healthData.blood_sugar),
+        hemoglobin: parseFloat(healthData.hemoglobin),
+        kick_count: parseInt(healthData.kick_count),
+        amniotic_fluid: parseFloat(healthData.amniotic_fluid),
+        previous_complications: parseInt(healthData.previous_complications),
+        rh_factor: parseInt(healthData.rh_factor),
+        pregnancy_order: parseInt(healthData.pregnancy_order)
+      };
+
+      const riskScore =
+        (predictionData.hemoglobin < 10 ? 2 : 0) +
+        (predictionData.blood_sugar > 140 ? 2 : 0) +
+        (predictionData.systolic_bp > 140 ? 2 : 0) +
+        (predictionData.diastolic_bp > 90 ? 2 : 0) +
+        (predictionData.amniotic_fluid < 10 ? 2 : 0) +
+        (predictionData.kick_count < 5 ? 1 : 0);
+
+      const riskLevel = riskScore >= 5 ? 'HIGH' : riskScore >= 2 ? 'MEDIUM' : 'LOW';
 
       const { error: insertError } = await supabase
         .from('health_records')
         .insert([{
           patient_id: patientId,
           recorded_by: user.id,
-          hemoglobin: parseFloat(healthData.hemoglobin),
-          blood_sugar: parseFloat(healthData.blood_sugar),
-          systolic_bp: parseInt(healthData.systolic_bp),
-          diastolic_bp: parseInt(healthData.diastolic_bp),
-          tsh: parseFloat(healthData.tsh),
-          amniotic_fluid: parseFloat(healthData.amniotic_fluid),
+          age: predictionData.age,
+          bmi: predictionData.bmi,
+          gestational_week: predictionData.gestational_week,
+          systolic_bp: predictionData.systolic_bp,
+          diastolic_bp: predictionData.diastolic_bp,
+          blood_sugar: predictionData.blood_sugar,
+          hemoglobin: predictionData.hemoglobin,
+          kick_count: predictionData.kick_count,
+          amniotic_fluid: predictionData.amniotic_fluid,
+          previous_complications: predictionData.previous_complications,
+          rh_factor: predictionData.rh_factor,
+          pregnancy_order: predictionData.pregnancy_order,
           risk_level: riskLevel,
           notes: healthData.notes
         }]);
@@ -126,16 +195,23 @@ export default function App() {
       setShowHealthForm(false);
       setHealthData({
         age: '',
-        hemoglobin: '',
-        blood_sugar: '',
+        bmi: '',
+        gestational_week: '',
         systolic_bp: '',
         diastolic_bp: '',
-        tsh: '',
+        blood_sugar: '',
+        hemoglobin: '',
+        kick_count: '',
         amniotic_fluid: '',
+        previous_complications: '0',
+        rh_factor: '1',
+        pregnancy_order: '1',
         notes: ''
       });
     } catch (err) {
       setError(err.message);
+    } finally {
+      setPredicting(false);
     }
   };
 
@@ -366,6 +442,44 @@ export default function App() {
   const riskColor = latestRecord?.risk_level === 'HIGH' ? '#ef4444' :
                     latestRecord?.risk_level === 'MEDIUM' ? '#f59e0b' : '#10b981';
 
+  const renderInputField = (name, label, type = 'number') => {
+    const config = MEDICAL_RANGES[name];
+    return (
+      <div>
+        <label style={{ display: "block", marginBottom: "8px", fontSize: "14px", color: "#94a3b8" }}>
+          {label} {config && `(${config.min}-${config.max} ${config.unit})`}
+        </label>
+        <input
+          ref={el => inputRefs.current[name] = el}
+          type={type}
+          step={config?.step || 'any'}
+          min={config?.min}
+          max={config?.max}
+          value={healthData[name]}
+          onChange={(e) => setHealthData({...healthData, [name]: e.target.value})}
+          onKeyDown={(e) => handleKeyDown(e, name)}
+          required
+          placeholder={`Use ↑↓ arrows`}
+          style={{
+            width: "100%",
+            padding: "12px",
+            background: "rgba(255, 255, 255, 0.05)",
+            border: `1px solid ${healthData[name] && !validateInput(name, healthData[name]) ? '#ef4444' : 'rgba(255, 255, 255, 0.1)'}`,
+            borderRadius: "10px",
+            color: "white",
+            outline: "none",
+            boxSizing: "border-box"
+          }}
+        />
+        {healthData[name] && !validateInput(name, healthData[name]) && (
+          <p style={{ color: '#ef4444', fontSize: '12px', marginTop: '4px' }}>
+            Must be between {config.min}-{config.max}
+          </p>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div style={{
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
@@ -467,9 +581,9 @@ export default function App() {
                     backdropFilter: "blur(10px)",
                     display: "inline-block"
                   }}>
-                    <p style={{ margin: "0", fontSize: "12px", color: "#94a3b8" }}>Heart Rate</p>
+                    <p style={{ margin: "0", fontSize: "12px", color: "#94a3b8" }}>Week {latestRecord?.gestational_week || '20'}</p>
                     <p style={{ margin: "4px 0 0 0", fontSize: "24px", fontWeight: "700" }}>
-                      {latestRecord?.systolic_bp || 98}<span style={{ fontSize: "14px", color: "#94a3b8" }}>%</span>
+                      Trimester {latestRecord?.gestational_week ? Math.ceil(latestRecord.gestational_week / 13) : 2}
                     </p>
                   </div>
                 </div>
@@ -547,16 +661,24 @@ export default function App() {
               }}>
                 <h3 style={{ margin: "0 0 24px 0", fontSize: "20px", fontWeight: "600" }}>Add Health Record</h3>
                 <form onSubmit={handleHealthSubmit}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "20px" }}>
+                    {renderInputField('age', 'Age')}
+                    {renderInputField('bmi', 'BMI')}
+                    {renderInputField('gestational_week', 'Gestational Week')}
+                    {renderInputField('systolic_bp', 'Systolic BP')}
+                    {renderInputField('diastolic_bp', 'Diastolic BP')}
+                    {renderInputField('blood_sugar', 'Blood Sugar')}
+                    {renderInputField('hemoglobin', 'Hemoglobin')}
+                    {renderInputField('kick_count', 'Kick Count')}
+                    {renderInputField('amniotic_fluid', 'Amniotic Fluid')}
+
                     <div>
                       <label style={{ display: "block", marginBottom: "8px", fontSize: "14px", color: "#94a3b8" }}>
-                        Age (years)
+                        Previous Complications
                       </label>
-                      <input
-                        type="number"
-                        value={healthData.age}
-                        onChange={(e) => setHealthData({...healthData, age: e.target.value})}
-                        required
+                      <select
+                        value={healthData.previous_complications}
+                        onChange={(e) => setHealthData({...healthData, previous_complications: e.target.value})}
                         style={{
                           width: "100%",
                           padding: "12px",
@@ -567,19 +689,19 @@ export default function App() {
                           outline: "none",
                           boxSizing: "border-box"
                         }}
-                      />
+                      >
+                        <option value="0" style={{ background: "#1a1a2e" }}>No</option>
+                        <option value="1" style={{ background: "#1a1a2e" }}>Yes</option>
+                      </select>
                     </div>
 
                     <div>
                       <label style={{ display: "block", marginBottom: "8px", fontSize: "14px", color: "#94a3b8" }}>
-                        Hemoglobin (g/dL)
+                        RH Factor
                       </label>
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={healthData.hemoglobin}
-                        onChange={(e) => setHealthData({...healthData, hemoglobin: e.target.value})}
-                        required
+                      <select
+                        value={healthData.rh_factor}
+                        onChange={(e) => setHealthData({...healthData, rh_factor: e.target.value})}
                         style={{
                           width: "100%",
                           padding: "12px",
@@ -590,108 +712,22 @@ export default function App() {
                           outline: "none",
                           boxSizing: "border-box"
                         }}
-                      />
+                      >
+                        <option value="1" style={{ background: "#1a1a2e" }}>Positive</option>
+                        <option value="0" style={{ background: "#1a1a2e" }}>Negative</option>
+                      </select>
                     </div>
 
                     <div>
                       <label style={{ display: "block", marginBottom: "8px", fontSize: "14px", color: "#94a3b8" }}>
-                        Blood Sugar (mg/dL)
+                        Pregnancy Order
                       </label>
                       <input
                         type="number"
-                        step="0.1"
-                        value={healthData.blood_sugar}
-                        onChange={(e) => setHealthData({...healthData, blood_sugar: e.target.value})}
-                        required
-                        style={{
-                          width: "100%",
-                          padding: "12px",
-                          background: "rgba(255, 255, 255, 0.05)",
-                          border: "1px solid rgba(255, 255, 255, 0.1)",
-                          borderRadius: "10px",
-                          color: "white",
-                          outline: "none",
-                          boxSizing: "border-box"
-                        }}
-                      />
-                    </div>
-
-                    <div>
-                      <label style={{ display: "block", marginBottom: "8px", fontSize: "14px", color: "#94a3b8" }}>
-                        Systolic BP (mmHg)
-                      </label>
-                      <input
-                        type="number"
-                        value={healthData.systolic_bp}
-                        onChange={(e) => setHealthData({...healthData, systolic_bp: e.target.value})}
-                        required
-                        style={{
-                          width: "100%",
-                          padding: "12px",
-                          background: "rgba(255, 255, 255, 0.05)",
-                          border: "1px solid rgba(255, 255, 255, 0.1)",
-                          borderRadius: "10px",
-                          color: "white",
-                          outline: "none",
-                          boxSizing: "border-box"
-                        }}
-                      />
-                    </div>
-
-                    <div>
-                      <label style={{ display: "block", marginBottom: "8px", fontSize: "14px", color: "#94a3b8" }}>
-                        Diastolic BP (mmHg)
-                      </label>
-                      <input
-                        type="number"
-                        value={healthData.diastolic_bp}
-                        onChange={(e) => setHealthData({...healthData, diastolic_bp: e.target.value})}
-                        required
-                        style={{
-                          width: "100%",
-                          padding: "12px",
-                          background: "rgba(255, 255, 255, 0.05)",
-                          border: "1px solid rgba(255, 255, 255, 0.1)",
-                          borderRadius: "10px",
-                          color: "white",
-                          outline: "none",
-                          boxSizing: "border-box"
-                        }}
-                      />
-                    </div>
-
-                    <div>
-                      <label style={{ display: "block", marginBottom: "8px", fontSize: "14px", color: "#94a3b8" }}>
-                        TSH (mIU/L)
-                      </label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={healthData.tsh}
-                        onChange={(e) => setHealthData({...healthData, tsh: e.target.value})}
-                        required
-                        style={{
-                          width: "100%",
-                          padding: "12px",
-                          background: "rgba(255, 255, 255, 0.05)",
-                          border: "1px solid rgba(255, 255, 255, 0.1)",
-                          borderRadius: "10px",
-                          color: "white",
-                          outline: "none",
-                          boxSizing: "border-box"
-                        }}
-                      />
-                    </div>
-
-                    <div>
-                      <label style={{ display: "block", marginBottom: "8px", fontSize: "14px", color: "#94a3b8" }}>
-                        Amniotic Fluid (cm)
-                      </label>
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={healthData.amniotic_fluid}
-                        onChange={(e) => setHealthData({...healthData, amniotic_fluid: e.target.value})}
+                        min="1"
+                        max="10"
+                        value={healthData.pregnancy_order}
+                        onChange={(e) => setHealthData({...healthData, pregnancy_order: e.target.value})}
                         required
                         style={{
                           width: "100%",
@@ -736,29 +772,31 @@ export default function App() {
                   <div style={{ display: "flex", gap: "12px", marginTop: "24px" }}>
                     <button
                       type="submit"
+                      disabled={predicting}
                       style={{
                         padding: "12px 32px",
-                        background: "linear-gradient(135deg, #ec4899 0%, #a855f7 100%)",
+                        background: predicting ? "rgba(255, 255, 255, 0.1)" : "linear-gradient(135deg, #ec4899 0%, #a855f7 100%)",
                         border: "none",
                         borderRadius: "10px",
                         color: "white",
-                        cursor: "pointer",
+                        cursor: predicting ? "not-allowed" : "pointer",
                         fontSize: "15px",
                         fontWeight: "600"
                       }}
                     >
-                      Submit & Analyze
+                      {predicting ? 'Analyzing...' : 'Predict Risk Level'}
                     </button>
                     <button
                       type="button"
                       onClick={() => setShowHealthForm(false)}
+                      disabled={predicting}
                       style={{
                         padding: "12px 32px",
                         background: "rgba(255, 255, 255, 0.1)",
                         border: "1px solid rgba(255, 255, 255, 0.2)",
                         borderRadius: "10px",
                         color: "white",
-                        cursor: "pointer",
+                        cursor: predicting ? "not-allowed" : "pointer",
                         fontSize: "15px"
                       }}
                     >
@@ -792,7 +830,7 @@ export default function App() {
                     }}>
                       <div>
                         <p style={{ margin: "0 0 4px 0", fontSize: "16px", fontWeight: "600" }}>
-                          Health Check #{healthRecords.length - idx}
+                          Week {record.gestational_week} Check
                         </p>
                         <p style={{ margin: "0", fontSize: "14px", color: "#94a3b8" }}>
                           {new Date(record.created_at).toLocaleDateString()} at {new Date(record.created_at).toLocaleTimeString()}
@@ -949,6 +987,16 @@ export default function App() {
                     <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#94a3b8" }}>Hemoglobin</p>
                     <p style={{ margin: "0", fontSize: "20px", fontWeight: "700" }}>
                       {latestRecord.hemoglobin} g/dL
+                    </p>
+                  </div>
+                  <div style={{
+                    background: "rgba(255, 255, 255, 0.05)",
+                    borderRadius: "12px",
+                    padding: "16px"
+                  }}>
+                    <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#94a3b8" }}>BMI</p>
+                    <p style={{ margin: "0", fontSize: "20px", fontWeight: "700" }}>
+                      {latestRecord.bmi}
                     </p>
                   </div>
                 </div>
